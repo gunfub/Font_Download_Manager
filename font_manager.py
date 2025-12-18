@@ -7,8 +7,7 @@ import json
 import shutil
 import threading
 from pathlib import Path
-from tkinter import Tk, Toplevel, Frame, Label, Entry, Button, Listbox, Scrollbar, END, SINGLE, messagebox, StringVar, ttk
-
+from tkinter import Tk, Toplevel, Frame, Label, Entry, Button, Listbox, Scrollbar, END, messagebox, StringVar, ttk
 from github_auth import GitHubManager
 
 # —— 常量与路径 —— #
@@ -83,10 +82,7 @@ class Indexer:
             owner, repo = r["owner"], r["repo"]
             descriptor_path = r.get("descriptor", "fonts.json")
             try:
-                repo_local = REPOS_DIR / f"{owner}_{repo}"
-                repo_local.mkdir(parents=True, exist_ok=True)
-                tmp_desc = repo_local / "_descriptor.json"
-                token = self.github.github_auth.get_stored_token() if hasattr(self.github, "github_auth") else None
+                tmp_desc = REPOS_DIR / f"{owner}_{repo}_descriptor.json"
                 self.github.download_file(owner, repo, descriptor_path, str(tmp_desc))
                 desc = json.loads(tmp_desc.read_text(encoding='utf-8'))
                 fonts = desc.get("fonts", [])
@@ -126,11 +122,10 @@ class FontDownloader:
     @staticmethod
     def download_to_tmp(owner, repo, files, progress_callback=None):
         tmp_files = []
-        repo_tmp_dir = TMP_DIR / f"{owner}_{repo}"
-        repo_tmp_dir.mkdir(parents=True, exist_ok=True)
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
         for i, f_rel in enumerate(files, start=1):
             filename = Path(f_rel).name
-            save_path = repo_tmp_dir / filename
+            save_path = TMP_DIR / filename
             try:
                 GitHubManager().download_file(owner, repo, f_rel, str(save_path))
             except Exception as e:
@@ -157,7 +152,6 @@ class FontDownloader:
 
         Label(win, text="字体已下载到临时文件夹。\n请将文件拖拽到 C:\\Windows\\Fonts 完成安装。").pack(expand=True, pady=10)
 
-        # 按钮横向排列
         btn_frame = Frame(win)
         btn_frame.pack(pady=10)
         Button(btn_frame, text="打开临时文件夹", command=lambda: FontDownloader.open_folder(tmp_dir)).pack(side="left", padx=6)
@@ -169,28 +163,28 @@ class FontDownloader:
         win.wait_window()
 
     @staticmethod
-    def show_uninstall_instructions(filename: str, gui_ref=None):
+    def show_uninstall_instructions(filenames, gui_ref=None):
         """
+        filenames: list[str]，支持多选
         gui_ref: FontManagerGUI 实例，用于更新已安装列表
         """
         win = Toplevel()
         win.title("卸载字体指引")
         win.geometry("420x130")
-        x, y = 50, 50  # 左上角偏下
+        x, y = 50, 50
         win.geometry(f"+{x}+{y}")
 
-        Label(win, text=f"请在系统字体文件夹中找到 {filename} \n并右键删除完成卸载。").pack(expand=True, pady=10)
+        Label(win, text="请在系统字体文件夹中找到以下字体并右键删除完成卸载：").pack(pady=6)
+        Label(win, text="\n".join(filenames)).pack(expand=True, pady=4)
 
-        # 按钮横向排列
         btn_frame = Frame(win)
         btn_frame.pack(pady=10)
         Button(btn_frame, text="打开系统字体文件夹", command=lambda: FontDownloader.open_folder(WINDOWS_FONTS_DIR)).pack(side="left", padx=6)
 
         def confirm_uninstall():
             if gui_ref:
-                # 删除 installed.json 中对应字体
                 installed = gui_ref.installed
-                keys_to_remove = [k for k, v in installed.items() if v['filename'] == filename]
+                keys_to_remove = [k for k, v in installed.items() if v['filename'] in filenames]
                 for k in keys_to_remove:
                     del installed[k]
                 save_json(INSTALLED_FILE, installed)
@@ -226,7 +220,7 @@ class FontManagerGUI:
         self.repo_cfg = self.indexer.repo_cfg
         self.installed = load_json(INSTALLED_FILE, {})
         self.setup_ui()
-        self.refresh_index_threaded()
+        # self.refresh_index_threaded()  # 注释掉启动时自动刷新索引
 
     def setup_ui(self):
         self.root.geometry("1000x640")
@@ -316,7 +310,8 @@ class FontManagerGUI:
 
         middle = Frame(frame)
         middle.pack(fill="both", expand=True, padx=6, pady=6)
-        self.fonts_tree = ttk.Treeview(middle, columns=("family","style","sources"), show="headings")
+        # 设置多选
+        self.fonts_tree = ttk.Treeview(middle, columns=("family","style","sources"), show="headings", selectmode="extended")
         self.fonts_tree.heading("family", text="Family")
         self.fonts_tree.heading("style", text="Style")
         self.fonts_tree.heading("sources", text="来源仓库数量")
@@ -349,68 +344,63 @@ class FontManagerGUI:
         if not sel:
             messagebox.showinfo("提示", "请先选择字体")
             return
-        fid = sel[0]
-        info = self.indexer.get_index().get(fid)
-        if not info:
-            messagebox.showerror("错误", "索引中未找到该字体")
-            return
-        sources = info.get("sources", [])
-        chosen = sources[0] if len(sources)==1 else self.ask_source_choice(sources)
-        if not chosen:
-            return
-        t = threading.Thread(target=self._download_font_thread, args=(info, chosen), daemon=True)
+        t = threading.Thread(target=self._download_fonts_thread, args=(sel,), daemon=True)
         t.start()
 
-    def _download_font_thread(self, info, chosen):
-        owner = chosen["owner"]
-        repo = chosen["repo"]
-        files = chosen.get("files", [])
-        if not files:
-            self._show_error("错误", "该来源未列出文件")
-            return
+    def _download_fonts_thread(self, fids):
+        for fid in fids:
+            info = self.indexer.get_index().get(fid)
+            if not info:
+                continue
+            sources = info.get("sources", [])
+            chosen = sources[0] if len(sources)==1 else self.ask_source_choice(sources)
+            if not chosen:
+                continue
+            owner = chosen["owner"]
+            repo = chosen["repo"]
+            files = chosen.get("files", [])
+            if not files:
+                continue
 
-        # 进度窗口
-        progress_win = Toplevel(self.root)
-        progress_win.title(f"下载字体 {info['meta'].get('name')}")
-        progress_win.geometry("400x120")
-        progress_win.transient(self.root)
-        progress_win.grab_set()
-        progress_var = StringVar()
-        Label(progress_win, text=f"正在下载字体 {info['meta'].get('name')}").pack(pady=6)
-        lbl = Label(progress_win, textvariable=progress_var)
-        lbl.pack(pady=4)
-        pb = ttk.Progressbar(progress_win, length=350, mode="determinate", maximum=len(files))
-        pb.pack(pady=6)
-        progress_win.update()
+            def callback(i, total, filename):
+                progress_var.set(f"正在下载 {i}/{total}: {filename}")
+                pb['value'] = i
+                progress_win.update_idletasks()
 
-        def callback(i, total, filename):
-            progress_var.set(f"正在下载 {i}/{total}: {filename}")
-            pb['value'] = i
-            progress_win.update_idletasks()
+            progress_win = Toplevel(self.root)
+            progress_win.title(f"下载字体 {info['meta'].get('name')}")
+            progress_win.geometry("400x120")
+            progress_win.transient(self.root)
+            progress_win.grab_set()
+            progress_var = StringVar()
+            Label(progress_win, text=f"正在下载字体 {info['meta'].get('name')}").pack(pady=6)
+            lbl = Label(progress_win, textvariable=progress_var)
+            lbl.pack(pady=4)
+            pb = ttk.Progressbar(progress_win, length=350, mode="determinate", maximum=len(files))
+            pb.pack(pady=6)
+            progress_win.update()
 
-        try:
-            tmp_files = FontDownloader.download_to_tmp(owner, repo, files, progress_callback=callback)
-        except Exception as e:
-            self._show_error("下载失败", str(e))
-            progress_win.destroy()
-            return
+            try:
+                tmp_files = FontDownloader.download_to_tmp(owner, repo, files, progress_callback=callback)
+            except Exception as e:
+                self._show_error("下载失败", str(e))
+                progress_win.destroy()
+                continue
 
-        pb['value'] = len(files)
-        progress_var.set("下载完成！")
-        progress_win.after(500, progress_win.destroy)
+            pb['value'] = len(files)
+            progress_var.set("下载完成！")
+            progress_win.after(500, progress_win.destroy)
 
-        # 引导用户拖拽安装
-        FontDownloader.show_install_instructions(TMP_DIR)
+            FontDownloader.show_install_instructions(TMP_DIR)
 
-        # 记录已下载字体
-        for f in tmp_files:
-            self.installed[f.name] = {
-                "filename": f.name,
-                "source": chosen["repo_key"],
-                "id": info['meta']['id']
-            }
-        save_json(INSTALLED_FILE, self.installed)
-        self.root.after(0, self.load_installed_list)
+            for f in tmp_files:
+                self.installed[f.name] = {
+                    "filename": f.name,
+                    "source": chosen["repo_key"],
+                    "id": info['meta']['id']
+                }
+            save_json(INSTALLED_FILE, self.installed)
+            self.root.after(0, self.load_installed_list)
 
     def _show_error(self, title, msg):
         self.root.after(0, lambda: messagebox.showerror(title, msg))
@@ -423,7 +413,7 @@ class FontManagerGUI:
         win.title("选择来源仓库")
         win.geometry("520x300")
         Label(win, text="检测到多个来源，请选择要下载的来源：").pack()
-        lb = Listbox(win, selectmode=SINGLE)
+        lb = Listbox(win, selectmode="single")
         lb.pack(fill="both", expand=True, padx=6, pady=6)
         for s in sources:
             lb.insert(END, f"{s['repo_key']}  -> files: {', '.join(s.get('files',[]))}")
@@ -445,12 +435,11 @@ class FontManagerGUI:
     def setup_installed_tab(self, parent):
         frame = parent
         Label(frame, text="已下载字体：").pack(anchor="nw")
-        self.installed_listbox = Listbox(frame, width=80, height=18)
+        self.installed_listbox = Listbox(frame, width=80, height=18, selectmode="extended")
         self.installed_listbox.pack(fill="both", expand=True, padx=6, pady=6)
         btn_frame = Frame(frame)
         btn_frame.pack(fill="x")
         Button(btn_frame, text="引导卸载选中字体", command=self.on_uninstall_selected).pack(side="left", padx=6)
-        
         Button(btn_frame, text="打开系统字体文件夹", command=lambda: FontDownloader.open_folder(WINDOWS_FONTS_DIR)).pack(side="left", padx=6)
         self.load_installed_list()
 
@@ -463,10 +452,9 @@ class FontManagerGUI:
         sel = self.installed_listbox.curselection()
         if not sel:
             return
-        idx = sel[0]
-        key = list(self.installed.keys())[idx]
-        filename = self.installed[key]["filename"]
-        FontDownloader.show_uninstall_instructions(filename, gui_ref=self)
+        keys = list(self.installed.keys())
+        filenames = [self.installed[keys[i]]["filename"] for i in sel]
+        FontDownloader.show_uninstall_instructions(filenames, gui_ref=self)
 
     # --- Refresh index in thread --- #
     def refresh_index_threaded(self):
