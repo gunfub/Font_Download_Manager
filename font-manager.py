@@ -8,9 +8,6 @@ import shutil
 import threading
 from pathlib import Path
 from tkinter import Tk, Toplevel, Frame, Label, Entry, Button, Listbox, Scrollbar, END, SINGLE, messagebox, StringVar, ttk
-import tkinter as tk
-import webbrowser
-import subprocess
 
 from github_auth import GitHubManager
 
@@ -172,20 +169,35 @@ class FontDownloader:
         win.wait_window()
 
     @staticmethod
-    def show_uninstall_instructions(filename: str):
+    def show_uninstall_instructions(filename: str, gui_ref=None):
+        """
+        gui_ref: FontManagerGUI 实例，用于更新已安装列表
+        """
         win = Toplevel()
         win.title("卸载字体指引")
         win.geometry("420x130")
         x, y = 50, 50  # 左上角偏下
         win.geometry(f"+{x}+{y}")
 
-        Label(win, text=f"请在系统字体文件夹中找到 {filename} 并右键删除完成卸载。").pack(expand=True, pady=10)
+        Label(win, text=f"请在系统字体文件夹中找到 {filename} \n并右键删除完成卸载。").pack(expand=True, pady=10)
 
         # 按钮横向排列
         btn_frame = Frame(win)
         btn_frame.pack(pady=10)
         Button(btn_frame, text="打开系统字体文件夹", command=lambda: FontDownloader.open_folder(WINDOWS_FONTS_DIR)).pack(side="left", padx=6)
-        Button(btn_frame, text="打开临时文件夹", command=lambda: FontDownloader.open_folder(TMP_DIR)).pack(side="left", padx=6)
+
+        def confirm_uninstall():
+            if gui_ref:
+                # 删除 installed.json 中对应字体
+                installed = gui_ref.installed
+                keys_to_remove = [k for k, v in installed.items() if v['filename'] == filename]
+                for k in keys_to_remove:
+                    del installed[k]
+                save_json(INSTALLED_FILE, installed)
+                gui_ref.load_installed_list()
+            win.destroy()
+
+        Button(btn_frame, text="我已卸载", command=confirm_uninstall).pack(side="left", padx=6)
 
         win.transient()
         win.grab_set()
@@ -439,7 +451,6 @@ class FontManagerGUI:
         btn_frame.pack(fill="x")
         Button(btn_frame, text="引导卸载选中字体", command=self.on_uninstall_selected).pack(side="left", padx=6)
         
-        Button(btn_frame, text="打开临时文件夹", command=lambda: FontDownloader.open_folder(TMP_DIR)).pack(side="left", padx=6)
         Button(btn_frame, text="打开系统字体文件夹", command=lambda: FontDownloader.open_folder(WINDOWS_FONTS_DIR)).pack(side="left", padx=6)
         self.load_installed_list()
 
@@ -455,7 +466,7 @@ class FontManagerGUI:
         idx = sel[0]
         key = list(self.installed.keys())[idx]
         filename = self.installed[key]["filename"]
-        FontDownloader.show_uninstall_instructions(filename)
+        FontDownloader.show_uninstall_instructions(filename, gui_ref=self)
 
     # --- Refresh index in thread --- #
     def refresh_index_threaded(self):
