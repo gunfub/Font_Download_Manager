@@ -6,16 +6,13 @@
 import os
 import json
 import shutil
-import hashlib
 import ctypes
 import threading
-import requests
 from pathlib import Path
 from tkinter import Tk, Toplevel, Frame, Label, Entry, Button, Listbox, Scrollbar, END, SINGLE, messagebox, StringVar, ttk
 import tkinter as tk
 import winreg
 
-# 引入你已有的 GitHub 管理类（假设 github_auth.py 在同目录）
 from github_auth import GitHubManager  # uses your existing auth & token storage
 
 # —— 常量与路径 —— #
@@ -26,11 +23,10 @@ REPOS_CONFIG = DATA_DIR / "repos.json"
 INDEX_FILE = DATA_DIR / "index.json"
 INSTALLED_FILE = DATA_DIR / "installed.json"
 
-# Windows per-user fonts folder
 LOCAL_FONTS_DIR = Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
 
-
 def download_from_raw(owner, repo, path, save_to, branch="main", token=None):
+    import requests
     url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
     headers = {}
     if token:
@@ -41,7 +37,6 @@ def download_from_raw(owner, repo, path, save_to, branch="main", token=None):
     with open(save_to, "wb") as f:
         f.write(r.content)
     return save_to
-
 
 # Windows API helpers
 gdi32 = ctypes.windll.gdi32
@@ -55,7 +50,6 @@ def ensure_dirs():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REPOS_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_FONTS_DIR.mkdir(parents=True, exist_ok=True)
-
 ensure_dirs()
 
 def load_json(path, default):
@@ -64,8 +58,7 @@ def load_json(path, default):
             return json.loads(path.read_text(encoding='utf-8'))
         except Exception:
             return default
-    else:
-        return default
+    return default
 
 def save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,15 +110,12 @@ class Indexer:
             try:
                 repo_local = REPOS_DIR / f"{owner}_{repo}"
                 repo_local.mkdir(parents=True, exist_ok=True)
-                # 下载 descriptor
                 tmp_desc = repo_local / "_descriptor.json"
-                # 通过 GitHubAuth 的 get_stored_token 方法获取令牌
                 token = self.github.github_auth.get_stored_token() if hasattr(self.github, "github_auth") else None
                 download_from_raw(owner, repo, descriptor_path, tmp_desc, branch="main", token=token)
                 desc = json.loads(tmp_desc.read_text(encoding='utf-8'))
                 fonts = desc.get("fonts", [])
                 for f in fonts:
-                    # canonical id
                     fid = f.get("id") or f"{f.get('family','')}_{f.get('name','')}".replace(" ", "_")
                     meta = {
                         "id": fid,
@@ -145,10 +135,8 @@ class Indexer:
                         "files": f.get("files", [])
                     })
             except Exception as e:
-                # 拉取某个仓库 descriptor 失败：记录日志但继续
                 print(f"[warn] fetch descriptor failed for {r['key']}: {e}")
                 continue
-        # 保存
         with self.lock:
             self.index = new_index
             save_json(INDEX_FILE, self.index)
@@ -160,54 +148,36 @@ class Indexer:
 
 # —— 安装 / 卸载 字体 —— #
 class WindowsFontInstaller:
-    def __init__(self):
-        pass
-
     @staticmethod
     def _broadcast_font_change():
-        # SendMessageTimeoutW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0, SMTO_ABORTIFHUNG, 1000, None)
         user32.SendMessageTimeoutW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0, SMTO_ABORTIFHUNG, 1000, ctypes.byref(ctypes.c_ulong()))
 
     @staticmethod
     def _add_font_resource(font_path: str):
-        # AddFontResourceExW expects wide string
         res = gdi32.AddFontResourceExW(str(font_path), FR_PRIVATE, 0)
         return res
 
     @staticmethod
     def install_font_file(src_path: Path, display_name: str):
-        """
-        将字体文件复制到 per-user fonts dir，并在 HKCU 注册表注册，然后广播字体变更。
-        display_name: Windows 下显示的字体名称（例如 "Inter Regular (TrueType)"）
-        """
         if not src_path.exists():
             raise FileNotFoundError(src_path)
-
         dest = LOCAL_FONTS_DIR / src_path.name
         shutil.copy2(src_path, dest)
-
-        # 写入 HKCU 注册表
         key_path = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-            # Value name 通常是 "Font Name (TrueType)" 或类似。我们用 display_name
             try:
                 winreg.SetValueEx(key, display_name, 0, winreg.REG_SZ, dest.name)
             except Exception as e:
                 print(f"[warn] registry set failed: {e}")
-
-        # 尝试动态加载到当前会话（有时不必要）
         try:
             WindowsFontInstaller._add_font_resource(str(dest))
         except Exception as e:
             print(f"[warn] AddFontResourceExW failed: {e}")
-
-        # 广播
         WindowsFontInstaller._broadcast_font_change()
         return dest
 
     @staticmethod
     def uninstall_font(display_name: str, filename: str):
-        # 删除注册表项并删除文件（file 在 LOCAL_FONTS_DIR）
         key_path = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
@@ -217,14 +187,12 @@ class WindowsFontInstaller:
                     pass
         except Exception as e:
             print(f"[warn] registry open failed: {e}")
-        # 删除文件
         local_file = LOCAL_FONTS_DIR / filename
         try:
             if local_file.exists():
                 local_file.unlink()
         except Exception as e:
             print(f"[warn] remove font file failed: {e}")
-        # broadcast
         WindowsFontInstaller._broadcast_font_change()
 
 # —— GUI —— #
@@ -237,7 +205,6 @@ class FontManagerGUI:
         self.repo_cfg = self.indexer.repo_cfg
         self.installed = load_json(INSTALLED_FILE, {})
         self.setup_ui()
-        # initial load
         self.refresh_index_threaded()
 
     def setup_ui(self):
@@ -248,17 +215,14 @@ class FontManagerGUI:
         main = ttk.Notebook(self.root)
         main.pack(fill="both", expand=True)
 
-        # Repos tab
         tab_repos = Frame(main)
         main.add(tab_repos, text="仓库管理")
         self.setup_repos_tab(tab_repos)
 
-        # Fonts tab
         tab_fonts = Frame(main)
         main.add(tab_fonts, text="字体总表")
         self.setup_fonts_tab(tab_fonts)
 
-        # Installed tab
         tab_installed = Frame(main)
         main.add(tab_installed, text="已安装")
         self.setup_installed_tab(tab_installed)
@@ -287,7 +251,6 @@ class FontManagerGUI:
         Button(right, text="添加仓库", command=self.on_add_repo).pack(pady=(8,4))
         Button(right, text="删除选中仓库", command=self.on_remove_repo).pack(pady=4)
         Button(right, text="刷新并合并索引", command=self.refresh_index_threaded).pack(pady=4)
-
         self.load_repo_listbox()
 
     def load_repo_listbox(self):
@@ -360,6 +323,7 @@ class FontManagerGUI:
                 continue
             self.fonts_tree.insert("", END, iid=fid, values=(family, style, sources))
 
+    # --- 安装字体（多文件 + 下载进度窗口） --- #
     def on_install_selected(self):
         sel = self.fonts_tree.selection()
         if not sel:
@@ -370,7 +334,6 @@ class FontManagerGUI:
         if not info:
             messagebox.showerror("错误", "索引中未找到该字体")
             return
-        # 如果 sources >1，让用户选择来源
         sources = info.get("sources", [])
         if len(sources) == 1:
             chosen = sources[0]
@@ -378,8 +341,10 @@ class FontManagerGUI:
             chosen = self.ask_source_choice(sources)
             if not chosen:
                 return
+        t = threading.Thread(target=self._install_font_files_thread, args=(info, chosen), daemon=True)
+        t.start()
 
-        # 将 chosen.files 中第一个有效文件下载到本地仓库文件夹，然后安装
+    def _install_font_files_thread(self, info, chosen):
         owner = chosen["owner"]
         repo = chosen["repo"]
         repo_key = chosen["repo_key"]
@@ -387,36 +352,70 @@ class FontManagerGUI:
         repo_local.mkdir(parents=True, exist_ok=True)
         files = chosen.get("files", [])
         if not files:
-            messagebox.showerror("错误", "该来源未列出文件")
-            return
-        target_file_rel = files[0]
-        target_save = repo_local / Path(target_file_rel).name
-        try:
-            # 下载字体文件（会使用已保存的 token）
-            self.github.download_file(owner, repo, target_file_rel, str(target_save))
-        except Exception as e:
-            messagebox.showerror("下载失败", str(e))
+            self._show_error("错误", "该来源未列出文件")
             return
 
-        # 计算 display_name（尽量使用 meta.name + style）
-        meta = info["meta"]
-        display_name = f"{meta.get('name') or fid} ({meta.get('style') or ''})".strip()
-        try:
-            dest = WindowsFontInstaller.install_font_file(target_save, display_name)
-            # 记录已安装
-            self.installed[display_name] = {
-                "filename": dest.name,
-                "source": repo_key,
-                "id": fid
-            }
-            save_json(INSTALLED_FILE, self.installed)
-            messagebox.showinfo("安装成功", f"字体已安装到 {dest}")
-            self.load_installed_list()
-        except Exception as e:
-            messagebox.showerror("安装失败", str(e))
+        # 弹出进度窗口（大一些，居中）
+        progress_win = Toplevel(self.root)
+        progress_win.title(f"安装字体 {info['meta'].get('name')}")
+        progress_win.geometry("400x120")
+        progress_win.resizable(False, False)
+        
+        # 居中屏幕
+        progress_win.update_idletasks()
+        w = progress_win.winfo_width()
+        h = progress_win.winfo_height()
+        ws = progress_win.winfo_screenwidth()
+        hs = progress_win.winfo_screenheight()
+        x = (ws // 2) - (w // 2)
+        y = (hs // 2) - (h // 2)
+        progress_win.geometry(f"{w}x{h}+{x}+{y}")
+
+        Label(progress_win, text=f"正在安装字体 {info['meta'].get('name')}").pack(pady=6)
+        progress_var = StringVar()
+        lbl = Label(progress_win, textvariable=progress_var)
+        lbl.pack(pady=4)
+
+        pb = ttk.Progressbar(progress_win, length=350, mode="determinate", maximum=len(files))
+        pb.pack(pady=6)
+
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+        progress_win.update()
+
+        for i, file_rel in enumerate(files, start=1):
+            progress_var.set(f"正在下载第 {i} / {len(files)} 个文件: {file_rel}")
+            pb['value'] = i - 1
+            progress_win.update_idletasks()
+
+            target_save = repo_local / Path(file_rel).name
+            try:
+                self.github.download_file(owner, repo, file_rel, str(target_save))
+                meta = info["meta"]
+                display_name = f"{meta.get('name') or info['meta']['id']} ({meta.get('style') or i})".strip()
+                WindowsFontInstaller.install_font_file(target_save, display_name)
+                self.installed[display_name] = {
+                    "filename": target_save.name,
+                    "source": repo_key,
+                    "id": info['meta']['id']
+                }
+            except Exception as e:
+                self._show_error("下载失败", str(e))
+
+        pb['value'] = len(files)
+        progress_var.set("安装完成！")
+        save_json(INSTALLED_FILE, self.installed)
+        self.root.after(0, self.load_installed_list)
+        progress_win.after(500, progress_win.destroy)
+
+
+    def _show_error(self, title, msg):
+        self.root.after(0, lambda: messagebox.showerror(title, msg))
+
+    def _show_info(self, title, msg):
+        self.root.after(0, lambda: messagebox.showinfo(title, msg))
 
     def ask_source_choice(self, sources):
-        # 弹窗让用户选择来源（简单列表选择）
         win = Toplevel(self.root)
         win.title("选择来源仓库")
         win.geometry("520x300")
@@ -431,8 +430,7 @@ class FontManagerGUI:
             if not cur:
                 messagebox.showwarning("提示", "请选择一个来源")
                 return
-            idx = cur[0]
-            chosen["value"] = sources[idx]
+            chosen["value"] = sources[cur[0]]
             win.destroy()
         Button(win, text="确定", command=on_ok).pack(pady=6)
         win.transient(self.root)
@@ -468,7 +466,6 @@ class FontManagerGUI:
             return
         try:
             WindowsFontInstaller.uninstall_font(name, info.get("filename"))
-            # remove record
             del self.installed[name]
             save_json(INSTALLED_FILE, self.installed)
             messagebox.showinfo("已卸载", f"{name} 已卸载")
@@ -482,9 +479,9 @@ class FontManagerGUI:
             try:
                 self.indexer.refresh_all()
                 self.refresh_fonts_view()
-                messagebox.showinfo("完成", "索引刷新并合并完成")
+                self._show_info("完成", "索引刷新并合并完成")
             except Exception as e:
-                messagebox.showerror("错误", f"刷新索引失败: {e}")
+                self._show_error("错误", f"刷新索引失败: {e}")
         t = threading.Thread(target=job, daemon=True)
         t.start()
 
