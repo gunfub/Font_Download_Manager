@@ -1,0 +1,12 @@
+[project]
+name = "Font_Download_Manager"
+version = "1.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "colorama>=0.4.6",
+    "keyring>=25.7.0",
+    "pyinstaller>=6.17.0",
+    "pyperclip>=1.11.0",
+    "pywebview>=6.1",
+    "requests>=2.32.5",
+]
